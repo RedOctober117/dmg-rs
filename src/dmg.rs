@@ -15,7 +15,15 @@ pub struct Dmg {
     // D | E
     // H | L
     general_purpose_registers: [u8; 6],
+    ime_flag: u8,
 }
+
+const REG_B: usize = 0;
+const REG_C: usize = 1;
+const REG_D: usize = 2;
+const REG_E: usize = 3;
+const REG_H: usize = 4;
+const REG_L: usize = 5;
 
 impl Dmg {
     pub fn cycle(&mut self) {
@@ -46,6 +54,10 @@ impl Dmg {
                 0 => self.ld_r16mem_a(middle_three_bits >> 1),
                 1..=u8::MAX => self.ld_a_r16mem(middle_three_bits >> 1),
             },
+            (0x00, 0b011) => match middle_three_bits & 0b001 {
+                0 => self.inc_r16(middle_three_bits >> 1),
+                1..=u8::MAX => self.dec_r16(middle_three_bits >> 1),
+            },
             (0x00, 0b100) => self.inc_r8(middle_three_bits),
             (0x00, 0b101) => self.dec_r8(middle_three_bits),
             (0x00, 0b110) => self.ld_r8_imm8(middle_three_bits),
@@ -64,6 +76,7 @@ impl Dmg {
             // 0b01
             (0x40, 0b00110110) => self.halt(),
             (0x40, _) => self.ld_r8_r8(data_bits),
+
             // 0b10
             (0x80, _) => match middle_three_bits {
                 0b000 => self.add_a_r8(end_three_bits),
@@ -76,10 +89,12 @@ impl Dmg {
                 0b111 => self.cp_a_r8(end_three_bits),
                 _ => {}
             },
+
             // 0b11
             (0xC0, 000) => match middle_three_bits {
                 0b100 => self.ldh_imm8_a(),
                 0b101 => self.add_sp_imm8(),
+                0b110 => self.ldh_a_imm8(),
                 0b111 => self.ld_hl_sp_imm8(),
                 0b000..=u8::MAX => self.ret_cond(),
             },
@@ -91,15 +106,15 @@ impl Dmg {
                 0b000..=u8::MAX => self.pop_r16stk(middle_three_bits >> 1),
             },
             (0xC0, 0b010) => match middle_three_bits {
-                0b100 => self.ld_c_a(),
+                0b100 => self.ldh_c_a(),
                 0b101 => self.ld_imm16_a(),
-                0b110 => self.ld_a_c(),
+                0b110 => self.ldh_a_c(),
                 0b111 => self.ld_a_imm16(),
                 0b000..=u8::MAX => self.jp_cond_imm16(middle_three_bits & 0b011),
             },
             (0xC0, 0b011) => match middle_three_bits {
                 0b000 => self.jp_imm16(),
-                0b001 => todo!(),
+                0b001 => self.prefix_table(),
                 0b110 => self.di(),
                 0b111 => self.ei(),
                 _ => {}
@@ -126,9 +141,15 @@ impl Dmg {
         }
     }
 
+    pub fn prefix_table(&mut self) {}
+
     pub fn nop(&mut self) {}
 
-    pub fn halt(&mut self) {}
+    pub fn halt(&mut self) {
+        self.ime_flag = 0;
+    }
+
+    // COMPLETED ABOVE
     pub fn stop(&mut self) {}
 
     pub fn ld_r8_r8(&mut self, suffix: u8) {
@@ -136,14 +157,51 @@ impl Dmg {
             self.general_purpose_registers[(suffix & 0x07) as usize];
     }
 
-    pub fn ld_r16_imm16(&mut self, data_bits: u8) {}
+    pub fn ld_r16_imm16(&mut self, data_bits: u8) {
+        self.general_purpose_registers[(data_bits & 0b10) as usize >> 1] =
+            self.ram[self.program_counter as usize];
+        self.program_counter += 1;
 
-    pub fn ld_r16mem_a(&mut self, data_bits: u8) {}
+        self.general_purpose_registers[(data_bits & 0b01) as usize] =
+            self.ram[self.program_counter as usize];
+        self.program_counter += 1;
+    }
 
-    pub fn ld_a_r16mem(&mut self, data_bits: u8) {}
+    pub fn ld_r16mem_a(&mut self, data_bits: u8) {
+        self.general_purpose_registers[(data_bits & 0b10) as usize >> 1] =
+            self.accumulator & 0xF0 >> 4;
+        self.general_purpose_registers[(data_bits & 0b01) as usize] = self.accumulator & 0x0F;
+    }
 
-    pub fn ld_imm16_sp(&mut self) {}
-    pub fn add_hl_r16(&mut self, data_bits: u8) {}
+    pub fn ld_a_r16mem(&mut self, data_bits: u8) {
+        self.accumulator = (self.general_purpose_registers[(data_bits & 0b10) as usize >> 1] << 4)
+            | self.general_purpose_registers[(data_bits & 0b01) as usize];
+        // self.general_purpose_registers[(data_bits & 0b01) as usize] = self.accumulator & 0x0F;
+    }
+
+    pub fn ld_imm16_sp(&mut self) {
+        let lsb = self.ram[self.program_counter as usize];
+        self.program_counter += 1;
+        let msb = self.ram[self.program_counter as usize];
+        self.program_counter += 1;
+
+        let addr = to_u16(msb, lsb) as usize;
+
+        self.ram[addr] = (self.stack_pointer & 0x00FF) as u8;
+        self.ram[addr + 1] = ((self.stack_pointer & 0xFF00) >> 8) as u8;
+    }
+
+    pub fn add_hl_r16(&mut self, data_bits: u8) {
+        let hl = to_u16(
+            self.general_purpose_registers[REG_H],
+            self.general_purpose_registers[REG_L],
+        );
+        let reg_0 = self.general_purpose_registers[((data_bits & 0b10) as u8 >> 1) as usize];
+        let reg_1 = self.general_purpose_registers[(data_bits & 0b01) as usize];
+
+        let (a, b) = hl.overflowing_add(to_u16(reg_0, reg_1));
+    }
+
     pub fn inc_r8(&mut self, data_bits: u8) {}
     pub fn dec_r8(&mut self, data_bits: u8) {}
     pub fn jr_imm8(&mut self) {}
@@ -158,6 +216,9 @@ impl Dmg {
     pub fn cpl(&mut self) {}
     pub fn scf(&mut self) {}
     pub fn ccf(&mut self) {}
+
+    pub fn inc_r16(&mut self, data_bits: u8) {}
+    pub fn dec_r16(&mut self, data_bits: u8) {}
 
     pub fn add_a_r8(&mut self, data_bits: u8) {}
     pub fn adc_a_r8(&mut self, data_bits: u8) {}
@@ -179,6 +240,7 @@ impl Dmg {
 
     pub fn ldh_imm8_a(&mut self) {}
     pub fn add_sp_imm8(&mut self) {}
+    pub fn ldh_a_imm8(&mut self) {}
     pub fn ld_hl_sp_imm8(&mut self) {}
     pub fn ret_cond(&mut self) {}
 
@@ -188,9 +250,9 @@ impl Dmg {
     pub fn ld_sp_hl(&mut self) {}
     pub fn pop_r16stk(&mut self, data_bits: u8) {}
 
-    pub fn ld_c_a(&mut self) {}
+    pub fn ldh_c_a(&mut self) {}
     pub fn ld_imm16_a(&mut self) {}
-    pub fn ld_a_c(&mut self) {}
+    pub fn ldh_a_c(&mut self) {}
     pub fn ld_a_imm16(&mut self) {}
     pub fn jp_cond_imm16(&mut self, data_bits: u8) {}
 
@@ -215,4 +277,7 @@ impl Dmg {
     // }
 
     pub fn load_rom(&mut self) {}
+}
+pub fn to_u16(msb: u8, lsb: u8) -> u16 {
+    ((msb as u16) << 8) | (lsb as u16)
 }
