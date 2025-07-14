@@ -158,25 +158,72 @@ impl Dmg {
     }
 
     pub fn ld_r16_imm16(&mut self, data_bits: u8) {
+        // 16b values are always loaded as little endian
+        // LSB
         self.general_purpose_registers[(data_bits & 0b10) as usize >> 1] =
             self.ram[self.program_counter as usize];
         self.program_counter += 1;
 
+        // MSB
         self.general_purpose_registers[(data_bits & 0b01) as usize] =
             self.ram[self.program_counter as usize];
         self.program_counter += 1;
     }
 
+    // POSSIBLE BUG: registers may need to be loaded as little endian, currently big endian
     pub fn ld_r16mem_a(&mut self, data_bits: u8) {
-        self.general_purpose_registers[(data_bits & 0b10) as usize >> 1] =
-            self.accumulator & 0xF0 >> 4;
-        self.general_purpose_registers[(data_bits & 0b01) as usize] = self.accumulator & 0x0F;
+        match data_bits {
+            0 => {
+                self.general_purpose_registers[REG_B] = 0x00;
+                self.general_purpose_registers[REG_C] = self.accumulator;
+            }
+            1 => {
+                self.general_purpose_registers[REG_D] = 0x00;
+                self.general_purpose_registers[REG_E] = self.accumulator;
+            }
+            2 => {
+                self.general_purpose_registers[REG_H] = 0x00;
+                self.general_purpose_registers[REG_L] = self.accumulator + 1;
+            }
+            3 => {
+                self.general_purpose_registers[REG_H] = 0x00;
+                self.general_purpose_registers[REG_L] = self.accumulator - 1;
+            }
+            _ => {}
+        }
     }
 
+    // POSSIBLE BUG: endianess
     pub fn ld_a_r16mem(&mut self, data_bits: u8) {
-        self.accumulator = (self.general_purpose_registers[(data_bits & 0b10) as usize >> 1] << 4)
-            | self.general_purpose_registers[(data_bits & 0b01) as usize];
-        // self.general_purpose_registers[(data_bits & 0b01) as usize] = self.accumulator & 0x0F;
+        match data_bits {
+            0 => {
+                self.accumulator = self.ram[to_u16(
+                    self.general_purpose_registers[REG_C],
+                    self.general_purpose_registers[REG_B],
+                ) as usize];
+            }
+            1 => {
+                self.accumulator = self.ram[to_u16(
+                    self.general_purpose_registers[REG_E],
+                    self.general_purpose_registers[REG_D],
+                ) as usize];
+            }
+            2 => {
+                self.accumulator = self.ram[to_u16(
+                    self.general_purpose_registers[REG_H],
+                    self.general_purpose_registers[REG_L],
+                ) as usize]
+                    + 1;
+            }
+            3 => {
+                self.accumulator = self.ram[to_u16(
+                    self.general_purpose_registers[REG_H],
+                    self.general_purpose_registers[REG_L],
+                ) as usize]
+                    - 1;
+            }
+            _ => {}
+        }
     }
 
     pub fn ld_imm16_sp(&mut self) {
@@ -199,13 +246,65 @@ impl Dmg {
         let reg_0 = self.general_purpose_registers[((data_bits & 0b10) as u8 >> 1) as usize];
         let reg_1 = self.general_purpose_registers[(data_bits & 0b01) as usize];
 
-        let (a, b) = hl.overflowing_add(to_u16(reg_0, reg_1));
+        let (sum, overflowed) = hl.overflowing_add(to_u16(reg_0, reg_1));
+
+        // MSB goes in higher letter MAYBE?
+        self.general_purpose_registers[REG_H] = ((sum & 0xFF00) >> 8) as u8;
+        self.general_purpose_registers[REG_L] = (sum & 0x00FF) as u8;
+
+        if overflowed {
+            self.flags_register |= 0b00010000;
+        }
     }
 
-    pub fn inc_r8(&mut self, data_bits: u8) {}
-    pub fn dec_r8(&mut self, data_bits: u8) {}
-    pub fn jr_imm8(&mut self) {}
-    pub fn jr_cond_imm8(&mut self, cond: u8) {}
+    pub fn inc_r8(&mut self, data_bits: u8) {
+        let (sum, overflowed) =
+            self.general_purpose_registers[data_bits as usize].overflowing_add(1);
+
+        self.general_purpose_registers[data_bits as usize] = sum;
+        if overflowed {
+            self.flags_register |= 0b00010000;
+        }
+    }
+
+    pub fn dec_r8(&mut self, data_bits: u8) {
+        let (sum, overflowed) =
+            self.general_purpose_registers[data_bits as usize].overflowing_sub(1);
+
+        self.general_purpose_registers[data_bits as usize] = sum;
+        if overflowed {
+            self.flags_register |= 0b00010000;
+        }
+    }
+
+    pub fn jr_imm8(&mut self) {
+        let destination = self.ram[self.program_counter as usize] as i8;
+        self.program_counter += 1;
+        let (sum, overflowed) = self
+            .program_counter
+            .overflowing_add_signed(destination as i16);
+        self.program_counter = sum;
+
+        if overflowed {
+            self.flags_register |= 0b00010000;
+        }
+    }
+
+    pub fn jr_cond_imm8(&mut self, cond: u8) {
+        let destination = self.ram[self.program_counter as usize] as i8;
+        self.program_counter += 1;
+        if cond != 0 {
+            let (sum, overflowed) = self
+                .program_counter
+                .overflowing_add_signed(destination as i16);
+            self.program_counter = sum;
+
+            if overflowed {
+                self.flags_register |= 0b00010000;
+            }
+        }
+    }
+
     pub fn ld_r8_imm8(&mut self, data_bits: u8) {}
 
     pub fn rlca(&mut self) {}
