@@ -141,6 +141,39 @@ impl Dmg {
         }
     }
 
+    // set when values are outside bounds of u8 or u16, depending on context
+    pub fn set_carry_flag(&mut self, carried: bool) {
+        if carried {
+            self.flags_register |= 0b0001_0000
+        } else {
+            self.flags_register &= 0b1110_1111
+        };
+    }
+
+    pub fn set_subtract_flag(&mut self, subtracted: bool) {
+        if subtracted {
+            self.flags_register |= 0b0100_0000
+        } else {
+            self.flags_register &= 0b1011_1111
+        };
+    }
+
+    pub fn set_half_carry_flag(&mut self, carried: bool) {
+        if carried {
+            self.flags_register |= 0b0010_0000
+        } else {
+            self.flags_register &= 0b1101_1111
+        };
+    }
+
+    pub fn set_zero_flag(&mut self, zero: bool) {
+        if zero {
+            self.flags_register |= 0b1000_0000
+        } else {
+            self.flags_register &= 0b0111_1111
+        };
+    }
+
     pub fn prefix_table(&mut self) {}
 
     pub fn nop(&mut self) {}
@@ -252,9 +285,7 @@ impl Dmg {
         self.general_purpose_registers[REG_H] = ((sum & 0xFF00) >> 8) as u8;
         self.general_purpose_registers[REG_L] = (sum & 0x00FF) as u8;
 
-        if overflowed {
-            self.flags_register |= 0b00010000;
-        }
+        self.set_carry_flag(overflowed);
     }
 
     pub fn inc_r8(&mut self, data_bits: u8) {
@@ -262,9 +293,7 @@ impl Dmg {
             self.general_purpose_registers[data_bits as usize].overflowing_add(1);
 
         self.general_purpose_registers[data_bits as usize] = sum;
-        if overflowed {
-            self.flags_register |= 0b00010000;
-        }
+        self.set_carry_flag(overflowed);
     }
 
     pub fn dec_r8(&mut self, data_bits: u8) {
@@ -272,9 +301,7 @@ impl Dmg {
             self.general_purpose_registers[data_bits as usize].overflowing_sub(1);
 
         self.general_purpose_registers[data_bits as usize] = sum;
-        if overflowed {
-            self.flags_register |= 0b00010000;
-        }
+        self.set_carry_flag(overflowed);
     }
 
     pub fn jr_imm8(&mut self) {
@@ -285,9 +312,7 @@ impl Dmg {
             .overflowing_add_signed(destination as i16);
         self.program_counter = sum;
 
-        if overflowed {
-            self.flags_register |= 0b00010000;
-        }
+        self.set_carry_flag(overflowed);
     }
 
     pub fn jr_cond_imm8(&mut self, cond: u8) {
@@ -299,20 +324,61 @@ impl Dmg {
                 .overflowing_add_signed(destination as i16);
             self.program_counter = sum;
 
-            if overflowed {
-                self.flags_register |= 0b00010000;
-            }
+            self.set_carry_flag(overflowed);
         }
     }
 
-    pub fn ld_r8_imm8(&mut self, data_bits: u8) {}
+    pub fn ld_r8_imm8(&mut self, data_bits: u8) {
+        self.general_purpose_registers[data_bits as usize] =
+            self.ram[self.program_counter as usize];
+        self.program_counter += 1;
+    }
 
-    pub fn rlca(&mut self) {}
-    pub fn rrca(&mut self) {}
-    pub fn rla(&mut self) {}
-    pub fn rra(&mut self) {}
-    pub fn daa(&mut self) {}
-    pub fn cpl(&mut self) {}
+    pub fn rlca(&mut self) {
+        if self.accumulator == u8::MAX {
+            self.set_carry_flag(true);
+        }
+        self.accumulator <<= 1;
+    }
+    pub fn rrca(&mut self) {
+        if self.accumulator & 1 != 0 {
+            self.set_carry_flag(true);
+        }
+        self.accumulator >>= 1;
+    }
+    pub fn rla(&mut self) {
+        self.accumulator <<= 1;
+    }
+    pub fn rra(&mut self) {
+        self.accumulator >>= 1;
+    }
+    pub fn daa(&mut self) {
+        let mut adjustment = 0;
+        if self.flags_register & 0b0100_0000 != 0 {
+            if self.flags_register & 0b0010_0000 != 0 {
+                adjustment += 0x6;
+            }
+            if self.flags_register & 0b001_0000 != 0 {
+                adjustment += 0x60;
+            }
+        } else {
+            if (self.flags_register & 0b0010_0000 != 0) | (self.accumulator & 0xF > 0x9) {
+                adjustment += 0x6;
+            }
+            if (self.flags_register & 0b001_0000 != 0) | (self.accumulator > 0x99) {
+                adjustment += 0x60;
+                self.set_carry_flag(true);
+            }
+        }
+        let result = self.accumulator - adjustment;
+        self.set_zero_flag(result == 0);
+        self.accumulator = result;
+    }
+    pub fn cpl(&mut self) {
+        self.accumulator = !self.accumulator;
+        self.set_subtract_flag(true);
+        self.set_half_carry_flag(true);
+    }
     pub fn scf(&mut self) {}
     pub fn ccf(&mut self) {}
 

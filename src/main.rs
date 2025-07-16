@@ -1,5 +1,5 @@
 pub mod dmg;
 
 pub fn main() {
-    println!("{:?}", 0xFF_u8.saturating_add(0x03_u8));
+    println!("{:?}", u8::MAX.overflowing_shl(1));
 }
