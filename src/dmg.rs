@@ -75,7 +75,7 @@ impl Dmg {
 
             // 0b01
             (0x40, 0b00110110) => self.halt(),
-            (0x40, _) => self.ld_r8_r8(data_bits),
+            (0x40, _) => self.ld_r8_r8(middle_three_bits, end_three_bits),
 
             // 0b10
             (0x80, _) => match middle_three_bits {
@@ -185,22 +185,74 @@ impl Dmg {
     // COMPLETED ABOVE
     pub fn stop(&mut self) {}
 
-    pub fn ld_r8_r8(&mut self, suffix: u8) {
-        self.general_purpose_registers[(suffix >> 3) as usize] =
-            self.general_purpose_registers[(suffix & 0x07) as usize];
+    pub fn ld_r8_r8(&mut self, middle_three_bits: u8, end_three_bits: u8) {
+        let source_value = match end_three_bits {
+            0..=5 => self.general_purpose_registers[middle_three_bits as usize],
+            6 => {
+                self.general_purpose_registers[to_u16(
+                    self.general_purpose_registers[REG_L],
+                    self.general_purpose_registers[REG_H],
+                ) as usize]
+            }
+            7 => self.accumulator,
+            _ => todo!(),
+        };
+
+        let destination = match middle_three_bits {
+            0..=5 => &mut self.general_purpose_registers[middle_three_bits as usize],
+            6 => {
+                &mut self.general_purpose_registers[to_u16(
+                    self.general_purpose_registers[REG_L],
+                    self.general_purpose_registers[REG_H],
+                ) as usize]
+            }
+            7 => &mut self.accumulator,
+            _ => todo!(),
+        };
+
+        *destination = source_value;
     }
 
     pub fn ld_r16_imm16(&mut self, data_bits: u8) {
         // 16b values are always loaded as little endian
         // LSB
-        self.general_purpose_registers[(data_bits & 0b10) as usize >> 1] =
-            self.ram[self.program_counter as usize];
-        self.program_counter += 1;
+        match data_bits {
+            0 => {
+                self.general_purpose_registers[REG_B] = self.ram[self.program_counter as usize];
+                self.program_counter += 1;
 
-        // MSB
-        self.general_purpose_registers[(data_bits & 0b01) as usize] =
-            self.ram[self.program_counter as usize];
-        self.program_counter += 1;
+                // MSB
+                self.general_purpose_registers[REG_C] = self.ram[self.program_counter as usize];
+                self.program_counter += 1;
+            }
+            1 => {
+                self.general_purpose_registers[REG_D] = self.ram[self.program_counter as usize];
+                self.program_counter += 1;
+
+                // MSB
+                self.general_purpose_registers[REG_E] = self.ram[self.program_counter as usize];
+                self.program_counter += 1;
+            }
+            2 => {
+                self.general_purpose_registers[REG_H] = self.ram[self.program_counter as usize];
+                self.program_counter += 1;
+
+                // MSB
+                self.general_purpose_registers[REG_L] = self.ram[self.program_counter as usize];
+                self.program_counter += 1;
+            }
+            3 => {
+                let lsb = self.ram[self.program_counter as usize];
+                self.program_counter += 1;
+
+                // MSB
+                let msb = self.ram[self.program_counter as usize];
+                self.program_counter += 1;
+
+                self.stack_pointer = to_u16(msb, lsb);
+            }
+            _ => {}
+        }
     }
 
     // POSSIBLE BUG: registers may need to be loaded as little endian, currently big endian
@@ -276,10 +328,24 @@ impl Dmg {
             self.general_purpose_registers[REG_H],
             self.general_purpose_registers[REG_L],
         );
-        let reg_0 = self.general_purpose_registers[((data_bits & 0b10) as u8 >> 1) as usize];
-        let reg_1 = self.general_purpose_registers[(data_bits & 0b01) as usize];
+        let value = match data_bits {
+            0 => to_u16(
+                self.general_purpose_registers[REG_C],
+                self.general_purpose_registers[REG_B],
+            ),
+            1 => to_u16(
+                self.general_purpose_registers[REG_E],
+                self.general_purpose_registers[REG_D],
+            ),
+            2 => to_u16(
+                self.general_purpose_registers[REG_L],
+                self.general_purpose_registers[REG_H],
+            ),
+            3 => self.stack_pointer,
+            _ => todo!(),
+        };
 
-        let (sum, overflowed) = hl.overflowing_add(to_u16(reg_0, reg_1));
+        let (sum, overflowed) = hl.overflowing_add(value);
 
         // MSB goes in higher letter MAYBE?
         self.general_purpose_registers[REG_H] = ((sum & 0xFF00) >> 8) as u8;
@@ -289,11 +355,27 @@ impl Dmg {
     }
 
     pub fn inc_r8(&mut self, data_bits: u8) {
-        let (sum, overflowed) =
-            self.general_purpose_registers[data_bits as usize].overflowing_add(1);
+        let register = match data_bits {
+            0..=5 => &mut self.general_purpose_registers[data_bits as usize],
 
-        self.general_purpose_registers[data_bits as usize] = sum;
+            6 => {
+                &mut self.general_purpose_registers[to_u16(
+                    self.general_purpose_registers[REG_L],
+                    self.general_purpose_registers[REG_H],
+                ) as usize]
+            }
+            7 => &mut self.accumulator,
+            _ => todo!(),
+        };
+
+        let (sum, overflowed) = register.overflowing_add(1);
+        *register = sum;
+
         self.set_carry_flag(overflowed);
+        self.set_subtract_flag(false);
+        if sum == 0 {
+            self.set_zero_flag(true);
+        }
     }
 
     pub fn dec_r8(&mut self, data_bits: u8) {
@@ -340,18 +422,22 @@ impl Dmg {
         }
         self.accumulator <<= 1;
     }
+
     pub fn rrca(&mut self) {
         if self.accumulator & 1 != 0 {
             self.set_carry_flag(true);
         }
         self.accumulator >>= 1;
     }
+
     pub fn rla(&mut self) {
         self.accumulator <<= 1;
     }
+
     pub fn rra(&mut self) {
         self.accumulator >>= 1;
     }
+
     pub fn daa(&mut self) {
         let mut adjustment = 0;
         if self.flags_register & 0b0100_0000 != 0 {
@@ -374,16 +460,106 @@ impl Dmg {
         self.set_zero_flag(result == 0);
         self.accumulator = result;
     }
+
     pub fn cpl(&mut self) {
         self.accumulator = !self.accumulator;
         self.set_subtract_flag(true);
         self.set_half_carry_flag(true);
     }
-    pub fn scf(&mut self) {}
-    pub fn ccf(&mut self) {}
 
-    pub fn inc_r16(&mut self, data_bits: u8) {}
-    pub fn dec_r16(&mut self, data_bits: u8) {}
+    pub fn scf(&mut self) {
+        self.set_subtract_flag(false);
+        self.set_half_carry_flag(false);
+        self.set_carry_flag(true);
+    }
+
+    pub fn ccf(&mut self) {
+        self.set_subtract_flag(false);
+        self.set_half_carry_flag(false);
+        self.flags_register ^= 0b0001_0000;
+    }
+
+    pub fn inc_r16(&mut self, data_bits: u8) {
+        match data_bits {
+            0 => {
+                let byte = to_u16(
+                    self.general_purpose_registers[REG_C],
+                    self.general_purpose_registers[REG_B],
+                )
+                .wrapping_add(1);
+                self.general_purpose_registers[REG_B] = (byte & 0x00FF) as u8;
+                self.general_purpose_registers[REG_C] = (byte & 0xFF00) as u8 >> 8;
+            }
+            1 => {
+                let byte = to_u16(
+                    self.general_purpose_registers[REG_E],
+                    self.general_purpose_registers[REG_D],
+                )
+                .wrapping_add(1);
+                self.general_purpose_registers[REG_D] = (byte & 0x00FF) as u8;
+                self.general_purpose_registers[REG_E] = (byte & 0xFF00) as u8 >> 8;
+            }
+            2 => {
+                let byte = to_u16(
+                    self.general_purpose_registers[REG_L],
+                    self.general_purpose_registers[REG_H],
+                )
+                .wrapping_add(1);
+                self.general_purpose_registers[REG_L] = (byte & 0x00FF) as u8;
+                self.general_purpose_registers[REG_H] = (byte & 0xFF00) as u8 >> 8;
+            }
+            3 => {
+                let byte = to_u16(
+                    self.general_purpose_registers[REG_L],
+                    self.general_purpose_registers[REG_H],
+                )
+                .wrapping_add(1);
+                self.stack_pointer = byte;
+            }
+            _ => {}
+        }
+    }
+
+    pub fn dec_r16(&mut self, data_bits: u8) {
+        match data_bits {
+            0 => {
+                let byte = to_u16(
+                    self.general_purpose_registers[REG_C],
+                    self.general_purpose_registers[REG_B],
+                )
+                .wrapping_sub(1);
+                self.general_purpose_registers[REG_B] = (byte & 0x00FF) as u8;
+                self.general_purpose_registers[REG_C] = (byte & 0xFF00) as u8 >> 8;
+            }
+            1 => {
+                let byte = to_u16(
+                    self.general_purpose_registers[REG_E],
+                    self.general_purpose_registers[REG_D],
+                )
+                .wrapping_sub(1);
+                self.general_purpose_registers[REG_D] = (byte & 0x00FF) as u8;
+                self.general_purpose_registers[REG_E] = (byte & 0xFF00) as u8 >> 8;
+            }
+            2 => {
+                let byte = to_u16(
+                    self.general_purpose_registers[REG_L],
+                    self.general_purpose_registers[REG_H],
+                )
+                .wrapping_sub(1);
+                self.general_purpose_registers[REG_L] = (byte & 0x00FF) as u8;
+                self.general_purpose_registers[REG_H] = (byte & 0xFF00) as u8 >> 8;
+            }
+            3 => {
+                let byte = to_u16(
+                    self.general_purpose_registers[REG_L],
+                    self.general_purpose_registers[REG_H],
+                )
+                .wrapping_sub(1);
+                self.stack_pointer = byte;
+            }
+            _ => {}
+        }
+    }
 
     pub fn add_a_r8(&mut self, data_bits: u8) {}
     pub fn adc_a_r8(&mut self, data_bits: u8) {}
@@ -443,6 +619,7 @@ impl Dmg {
 
     pub fn load_rom(&mut self) {}
 }
+
 pub fn to_u16(msb: u8, lsb: u8) -> u16 {
     ((msb as u16) << 8) | (lsb as u16)
 }
